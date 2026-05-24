@@ -1,0 +1,61 @@
+Stage 1: INIT → runs _stage_init
+Correct. This is Gate 1 — verifies the company exists. If it fails, the pipeline escalates immediately. If it passes, it populates the company identity (ticker, exchange, full name) into session state and moves on.
+Stage 2: IDENTITY_VERIFIED → runs _stage_retrieval
+Correct. Now that we know the company is real, this stage goes and fetches the raw data — web data (like stock price) and doc data (like 10-K filings). Nothing is cleaned yet, just raw retrieval.
+Stage 3: RETRIEVAL_COMPLETE → runs _stage_normalize
+Correct. Takes that raw retrieved data and normalizes it — standardizing financial figures into a consistent format (e.g., revenue in USD millions, fiscal year label, etc.). Sets a normalized = True flag when done.
+Stage 4: NORMALIZED → runs _stage_analysis
+Mostly correct, but one important detail — this stage starts with Gate 2, which checks that normalization actually happened before proceeding. Only then does the fork analysis run. The two lenses (growth and risk) represent two different analytical approaches, and one is selected as the final output.
+Stage 5: ANALYSIS_COMPLETE → runs _stage_report
+Correct. Pulls together the company identity, normalized financials, and the selected analysis fork into one final report object, then moves to REPORT_READY.
+
+
+Great question — let's be precise about this.
+Where the context slice is built:
+pythoncontext = {"raw_input": self.session.company.raw_input}
+That single line in _stage_init inside coordinator.py. That's it. The coordinator has the full session object — which at that point contains the session ID, all stage history, retrieval data placeholders, analysis placeholders, escalation flags, timestamps — and it deliberately strips all of that down to just the one field the web agent actually needs to do its job.
+Why that counts as a context slice:
+The session object at that moment looks like this:
+pythonSessionState(
+    session_id = "106436b4-9344-422c-9f73-...",
+    created_at = "2026-05-24T10:23:11",
+    stage      = "INIT",
+    escalation_flag  = False,
+    escalation_reason = None,
+    company = CompanyIdentity(
+        raw_input = "Apple",   # ← only this is relevant to the web agent
+        verified  = False,
+        ticker    = None,
+        exchange  = None,
+        full_name = None,
+    ),
+    retrieval = RetrievalData(web_raw=None, doc_raw=None, ...),
+    analysis  = AnalysisData(fork_a=None, fork_b=None, ...),
+    history   = [...]
+)
+The coordinator passes this to the web agent:
+pythoncontext = {"raw_input": "Apple"}
+Everything else is withheld. The web agent cannot see the session ID, stage history, other agents' results, or anything about what came before. That's the slice.
+
+Real user message → what becomes the context slice:
+User types:
+
+"Can you give me a financial breakdown of Dangote Cement?"
+
+The coordinator extracts the company name and the context slice passed to the web agent is:
+python{"raw_input": "Dangote Cement"}
+The web agent then builds its prompt around that one value:
+"A user wants financial analysis on: 'Dangote Cement'
+Use the company_lookup tool to determine if this is a real,
+publicly listed company on a major stock exchange..."
+And the model returns the tool call:
+python{
+    "verified": True,
+    "ticker":   "DANGCEM",
+    "exchange": "NGX",        # Nigerian Exchange Group
+    "full_name": "Dangote Cement Plc",
+    "reason":   None
+}
+Gate 1 evaluates it, passes, and the coordinator writes those four fields back into session.company. From that point on every downstream agent gets a richer slice — ticker, exchange, full_name — but still never the raw session object.
+
+The honest limitation right now:
